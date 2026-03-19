@@ -240,12 +240,10 @@ async function authRoutes(fastify) {
         ? userSnap.data().twilio_identity
         : `${clientId}_${uid}`
 
-      const apiSecret = decrypt(client.twilio_api_secret_enc)
-
       const token = new AccessToken(
-        client.twilio_subaccount_sid,
-        client.twilio_api_key,
-        apiSecret,
+        process.env.TWILIO_ACCOUNT_SID,
+        process.env.TWILIO_API_KEY_SID || client.twilio_api_key,
+        process.env.TWILIO_API_KEY_SECRET || decrypt(client.twilio_api_secret_enc),
         { ttl: 3600, identity }
       )
 
