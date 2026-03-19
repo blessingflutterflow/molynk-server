@@ -71,9 +71,7 @@ async function voiceRoutes(fastify) {
           started_at: new Date().toISOString(),
         }).catch(err => fastify.log.error(err, 'Failed to log outbound call'))
 
-        // NOTE: callerId must be a number owned by the subaccount
-        // For now we omit it — Twilio will use the subaccount's default number
-        const dial = response.dial()
+        const dial = response.dial(callerId ? { callerId } : {})
         // Basic check: if it looks like a phone number, dial number, else dial client
         if (/^\+?\d+$/.test(To)) {
           dial.number(To)
