@@ -14,8 +14,8 @@ const app = Fastify({
 async function build() {
   // Plugins
   await app.register(require('@fastify/cors'), {
-    origin: process.env.NODE_ENV === 'production'
-      ? [process.env.WEB_APP_URL]
+    origin: process.env.WEB_APP_URL
+      ? process.env.WEB_APP_URL.split(',').map(u => u.trim())
       : true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
