@@ -242,8 +242,8 @@ async function authRoutes(fastify) {
 
       const token = new AccessToken(
         process.env.TWILIO_ACCOUNT_SID,
-        process.env.TWILIO_API_KEY_SID || client.twilio_api_key,
-        process.env.TWILIO_API_KEY_SECRET || decrypt(client.twilio_api_secret_enc),
+        process.env.TWILIO_ACCOUNT_SID,
+        process.env.TWILIO_AUTH_TOKEN,
         { ttl: 3600, identity }
       )
 
