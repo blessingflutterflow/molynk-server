@@ -45,6 +45,8 @@ async function voiceRoutes(fastify) {
     const { clientId } = request.params
     const response = twiml()
 
+    request.log.info({ body: request.body }, 'Webhook body received')
+
     try {
       // 1. Check if OUTBOUND call from Web Dialer (From starts with 'client:')
       if (From && From.startsWith('client:')) {
