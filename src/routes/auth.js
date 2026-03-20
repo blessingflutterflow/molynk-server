@@ -12,9 +12,9 @@ const { authenticate } = require('../middleware/auth')
 
 // Molynk pricing plans (ZAR, stored in cents for Paystack)
 const PLANS = {
-  solo:   { amount: 29900,  label: 'Solo',   extensions: 1,  minutes: 100, numbers: 1 },
-  team:   { amount: 59900,  label: 'Team',   extensions: 3,  minutes: 200, numbers: 1 },
-  office: { amount: 99900,  label: 'Office', extensions: 10, minutes: 500, numbers: 2 },
+  starter: { amount: 47900,  label: 'Starter', extensions: 3,  minutes: 300,  numbers: 1 },
+  growth:  { amount: 84900,  label: 'Growth',  extensions: 6,  minutes: 650,  numbers: 2 },
+  premium: { amount: 219900, label: 'Premium', extensions: 15, minutes: 1750, numbers: 3 },
 }
 
 async function authRoutes(fastify) {
@@ -38,8 +38,8 @@ async function authRoutes(fastify) {
       await fastify.db.collection('clients').doc(uid).set({
         name: companyName,
         email,
-        plan: plan || 'solo',
-        plan_limits: PLANS[plan || 'solo'],
+        plan: plan || 'starter',
+        plan_limits: PLANS[plan || 'starter'],
         status: 'provisioning',
         created_at: new Date().toISOString(),
       })
@@ -144,8 +144,8 @@ async function authRoutes(fastify) {
         return reply.status(402).send({ error: 'Payment not confirmed' })
       }
 
-      const plan = data.data.metadata?.plan || 'solo'
-      const selectedPlan = PLANS[plan] || PLANS.solo
+      const plan = data.data.metadata?.plan || 'starter'
+      const selectedPlan = PLANS[plan] || PLANS.starter
 
       // 2. Create Firebase Auth user
       const userRecord = await fastify.firebase.auth().createUser({
