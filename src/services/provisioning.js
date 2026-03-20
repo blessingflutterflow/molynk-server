@@ -1,51 +1,44 @@
 /**
  * Twilio Provisioning Service
  * Called when a new Molynk client signs up.
- * Creates: subaccount → API key → TwiML App → stores in Firestore
- * NOTE: Number purchase is handled separately via POST /numbers/assign
+ *
+ * Architecture (learned from dev):
+ * - Subaccount  → billing isolation only (not used for calls)
+ * - TwiML App   → lives on MASTER account (master must own it for Access Tokens to work)
+ * - Numbers     → live on MASTER account (handled separately via POST /numbers/assign)
+ * - API Key     → master TWILIO_API_KEY_SID used for all tokens (no per-client keys needed)
  */
 const { encrypt } = require('../utils/crypto')
 
 const WEBHOOK_BASE = process.env.TWILIO_WEBHOOK_BASE_URL
 
 async function provisionClient(fastify, { clientId, friendlyName }) {
-  const { twilio, db } = fastify
+  const { twilio: masterClient, db } = fastify
 
-  // 1. Create Twilio subaccount
-  const subaccount = await twilio.api.accounts.create({
+  // 1. Create Twilio subaccount (billing isolation only)
+  const subaccount = await masterClient.api.accounts.create({
     friendlyName: `molynk_${clientId}`,
   })
-
   fastify.log.info({ clientId, subaccountSid: subaccount.sid }, 'Subaccount created')
 
-  // 2. Create API Key for the subaccount (safer than using auth token directly)
-  const subClient = fastify.twilioFor(subaccount.sid, subaccount.authToken)
-  const apiKey = await subClient.newKeys.create({ friendlyName: `molynk_key_${clientId}` })
-
-  fastify.log.info({ clientId }, 'API key created')
-
-  // 3. Create TwiML App (points Twilio to our webhooks)
+  // 2. Create TwiML App on MASTER account (critical — must be on master for Access Tokens)
   const webhookBase = WEBHOOK_BASE || 'https://placeholder.molynk.co.za'
-  const twimlApp = await subClient.applications.create({
+  const twimlApp = await masterClient.applications.create({
     friendlyName: `molynk_app_${clientId}`,
     voiceUrl: `${webhookBase}/voice/inbound/${clientId}`,
     voiceMethod: 'POST',
     statusCallback: `${webhookBase}/voice/status`,
     statusCallbackMethod: 'POST',
   })
+  fastify.log.info({ clientId, twimlAppSid: twimlApp.sid }, 'TwiML App created on master account')
 
-  fastify.log.info({ clientId, twimlAppSid: twimlApp.sid }, 'TwiML App created')
-
-  // 4. Persist to Firestore (credentials encrypted at rest)
-  // Status = 'provisioning' — becomes 'active' once user assigns a number
+  // 3. Persist to Firestore
+  // Note: no API key stored — all tokens use master TWILIO_API_KEY_SID from env
   await db.collection('clients').doc(clientId).update({
     twilio_subaccount_sid: subaccount.sid,
     twilio_auth_token_enc: encrypt(subaccount.authToken),
-    twilio_api_key: apiKey.sid,
-    twilio_api_secret_enc: encrypt(apiKey.secret),
     twiml_app_sid: twimlApp.sid,
     provisioned_at: new Date().toISOString(),
-    // Keep status as 'provisioning' until user picks a number
   })
 
   fastify.log.info({ clientId }, 'Client provisioned — awaiting number selection')
@@ -57,7 +50,7 @@ async function provisionClient(fastify, { clientId, friendlyName }) {
 }
 
 /**
- * Suspend a client — release number, suspend subaccount
+ * Suspend a client — suspend their subaccount
  */
 async function suspendClient(fastify, clientId) {
   const clientSnap = await fastify.db.collection('clients').doc(clientId).get()

@@ -3,19 +3,25 @@
  * - POST /auth/signup          — create client + provision Twilio
  * - POST /auth/paystack/init   — initialise Paystack transaction → returns authorization_url
  * - POST /auth/paystack/verify — verify payment → create Firebase user → provision Twilio
- * - GET  /auth/token           — generate Twilio Access Token for Flutter app
+ * - GET  /auth/token           — generate Twilio Access Token for web dialer + Flutter app
  */
 const { AccessToken } = require('twilio').jwt
 const { VoiceGrant } = AccessToken
 const { provisionClient } = require('../services/provisioning')
-const { decrypt } = require('../utils/crypto')
 const { authenticate } = require('../middleware/auth')
+
+// Molynk pricing plans (ZAR, stored in cents for Paystack)
+const PLANS = {
+  solo:   { amount: 29900,  label: 'Solo',   extensions: 1,  minutes: 100, numbers: 1 },
+  team:   { amount: 59900,  label: 'Team',   extensions: 3,  minutes: 200, numbers: 1 },
+  office: { amount: 99900,  label: 'Office', extensions: 10, minutes: 500, numbers: 2 },
+}
 
 async function authRoutes(fastify) {
   /**
    * POST /auth/signup
-   * Called after Firebase Auth creates the user.
-   * Creates the Firestore client record + provisions Twilio.
+   * Called after Firebase Auth creates the user on the frontend.
+   * Creates the Firestore client record + provisions Twilio async.
    */
   fastify.post('/signup', async (request, reply) => {
     const { uid, companyName, email, plan } = request.body
@@ -24,11 +30,16 @@ async function authRoutes(fastify) {
       return reply.status(400).send({ error: 'uid, companyName, and email are required' })
     }
 
+    if (plan && !PLANS[plan]) {
+      return reply.status(400).send({ error: `Invalid plan. Valid plans: ${Object.keys(PLANS).join(', ')}` })
+    }
+
     try {
       await fastify.db.collection('clients').doc(uid).set({
         name: companyName,
         email,
-        plan: plan || 'starter',
+        plan: plan || 'solo',
+        plan_limits: PLANS[plan || 'solo'],
         status: 'provisioning',
         created_at: new Date().toISOString(),
       })
@@ -51,7 +62,7 @@ async function authRoutes(fastify) {
   /**
    * POST /auth/paystack/init
    * Initialises a Paystack transaction and returns the authorization_url.
-   * Frontend redirects the user to that URL — no popup needed.
+   * Frontend redirects the user to that URL.
    *
    * Body: { email, plan, companyName }
    * Returns: { authorization_url, reference }
@@ -63,14 +74,10 @@ async function authRoutes(fastify) {
       return reply.status(400).send({ error: 'email and plan are required' })
     }
 
-    const planAmounts = {
-      starter: 47900,  // R479 in kobo (Paystack uses smallest currency unit for ZAR = cents)
-      growth:  84900,  // R849
-      premium: 219900, // R2199
+    const selectedPlan = PLANS[plan]
+    if (!selectedPlan) {
+      return reply.status(400).send({ error: `Invalid plan. Valid plans: ${Object.keys(PLANS).join(', ')}` })
     }
-
-    const amount = planAmounts[plan]
-    if (!amount) return reply.status(400).send({ error: 'Invalid plan' })
 
     const callbackUrl = `${process.env.WEB_APP_URL}/signup/callback`
 
@@ -83,14 +90,14 @@ async function authRoutes(fastify) {
         },
         body: JSON.stringify({
           email,
-          amount,
+          amount: selectedPlan.amount,
           currency: 'ZAR',
           callback_url: callbackUrl,
           metadata: {
             plan,
             company_name: companyName,
             custom_fields: [
-              { display_name: 'Plan', variable_name: 'plan', value: plan },
+              { display_name: 'Plan', variable_name: 'plan', value: selectedPlan.label },
               { display_name: 'Company', variable_name: 'company_name', value: companyName },
             ],
           },
@@ -103,6 +110,7 @@ async function authRoutes(fastify) {
       return reply.send({
         authorization_url: data.data.authorization_url,
         reference: data.data.reference,
+        plan: selectedPlan,
       })
     } catch (err) {
       fastify.log.error(err, 'Paystack init error')
@@ -136,7 +144,8 @@ async function authRoutes(fastify) {
         return reply.status(402).send({ error: 'Payment not confirmed' })
       }
 
-      const plan = data.data.metadata?.plan || 'starter'
+      const plan = data.data.metadata?.plan || 'solo'
+      const selectedPlan = PLANS[plan] || PLANS.solo
 
       // 2. Create Firebase Auth user
       const userRecord = await fastify.firebase.auth().createUser({
@@ -152,6 +161,7 @@ async function authRoutes(fastify) {
         name: companyName,
         email,
         plan,
+        plan_limits: selectedPlan,
         paystack_reference: reference,
         status: 'provisioning',
         created_at: new Date().toISOString(),
@@ -159,7 +169,7 @@ async function authRoutes(fastify) {
 
       await fastify.firebase.auth().setCustomUserClaims(uid, { clientId: uid })
 
-      // 4. Provision Twilio subaccount async (user picks number separately)
+      // 4. Provision Twilio subaccount + TwiML App async (user picks number separately)
       provisionClient(fastify, { clientId: uid, friendlyName: companyName })
         .catch(err => {
           fastify.log.error(err, `Provisioning failed for client ${uid}`)
@@ -169,7 +179,7 @@ async function authRoutes(fastify) {
       // 5. Return a custom token so frontend can sign in immediately
       const customToken = await fastify.firebase.auth().createCustomToken(uid)
 
-      return reply.status(201).send({ uid, customToken, plan })
+      return reply.status(201).send({ uid, customToken, plan, plan_limits: selectedPlan })
     } catch (err) {
       if (err.code === 'auth/email-already-exists') {
         return reply.status(409).send({ error: 'An account with this email already exists. Please sign in.' })
@@ -180,9 +190,16 @@ async function authRoutes(fastify) {
   })
 
   /**
+   * GET /auth/plans
+   * Returns available plans and pricing. Public — no auth required.
+   */
+  fastify.get('/plans', async (request, reply) => {
+    return reply.send({ plans: PLANS })
+  })
+
+  /**
    * POST /auth/reprovision
    * Re-triggers Twilio provisioning for accounts with status 'provision_failed'.
-   * Protected — must be authenticated.
    */
   fastify.post('/reprovision', { preHandler: authenticate }, async (request, reply) => {
     const { clientId } = request
@@ -193,15 +210,12 @@ async function authRoutes(fastify) {
 
       const client = clientSnap.data()
 
-      // Only reprovision if actually failed or stuck in provisioning
       if (client.status === 'active') {
         return reply.send({ message: 'Already provisioned' })
       }
 
-      // Reset status
       await fastify.db.collection('clients').doc(clientId).update({ status: 'provisioning' })
 
-      // Re-trigger async
       provisionClient(fastify, { clientId, friendlyName: client.name })
         .catch(err => {
           fastify.log.error(err, `Re-provisioning failed for client ${clientId}`)
@@ -217,7 +231,8 @@ async function authRoutes(fastify) {
 
   /**
    * GET /auth/token
-   * Returns a Twilio Access Token scoped to the authenticated client's subaccount.
+   * Returns a Twilio Access Token for the web dialer + Flutter app.
+   * Always uses master account API key — works because TwiML Apps are on master.
    * Flutter app calls this on login and refreshes every 50 minutes.
    */
   fastify.get('/token', { preHandler: authenticate }, async (request, reply) => {
@@ -232,14 +247,17 @@ async function authRoutes(fastify) {
         return reply.status(403).send({ error: `Account is ${client.status}` })
       }
 
+      // Identity: prefer stored identity, fallback to clientId_uid
       const userSnap = await fastify.db
         .collection('clients').doc(clientId)
         .collection('users').doc(uid).get()
 
-      const identity = userSnap.exists
+      const identity = userSnap.exists && userSnap.data().twilio_identity
         ? userSnap.data().twilio_identity
         : `${clientId}_${uid}`
 
+      // Always sign with master account credentials
+      // TwiML App lives on master — this is the correct architecture
       const token = new AccessToken(
         process.env.TWILIO_ACCOUNT_SID,
         process.env.TWILIO_API_KEY_SID,
@@ -252,20 +270,6 @@ async function authRoutes(fastify) {
         incomingAllow: true,
       })
       token.addGrant(voiceGrant)
-
-      // Auto-sync TwiML App URL during development (in case ngrok is restarted)
-      const webhookBase = process.env.TWILIO_WEBHOOK_BASE_URL
-      if (webhookBase) {
-        try {
-          const subClient = fastify.twilioFor(client.twilio_subaccount_sid, apiSecret)
-          await subClient.applications(client.twiml_app_sid).update({
-            voiceUrl: `${webhookBase}/voice/inbound/${clientId}`,
-            statusCallback: `${webhookBase}/voice/status`,
-          })
-        } catch (syncErr) {
-          fastify.log.warn(syncErr, 'Could not sync TwiML App URL')
-        }
-      }
 
       return reply.send({ token: token.toJwt(), identity, ttl: 3600 })
     } catch (err) {
